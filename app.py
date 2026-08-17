@@ -112,13 +112,212 @@ def get_section(data, *keys):
     return value if isinstance(value, list) else []
 
 
+def deduplicate_strings(values):
+    """
+    Remove duplicate strings while preserving their original order.
+    Comparison ignores capitalization and surrounding whitespace.
+    """
+    if not isinstance(values, list):
+        return []
+
+    unique_values = []
+    seen = set()
+
+    for value in values:
+        if not isinstance(value, str):
+            continue
+
+        cleaned = value.strip()
+
+        if not cleaned:
+            continue
+
+        normalized = cleaned.lower()
+
+        if normalized not in seen:
+            seen.add(normalized)
+            unique_values.append(cleaned)
+
+    return unique_values
+
+
+def get_total_participants(analysis, fallback="N/A"):
+    """
+    Prefer the total participant count established in evidence_base.
+    Fall back to the model's coverage.total for compatibility with
+    older Pattern outputs.
+    """
+    evidence_base = get_value(analysis, "evidence_base", default={})
+
+    if isinstance(evidence_base, dict):
+        total = evidence_base.get("total_participants")
+
+        if isinstance(total, int) and total >= 0:
+            return total
+
+        if isinstance(total, str) and total.isdigit():
+            return int(total)
+
+    return fallback
+
+
+def get_unique_quote_sources(quotes):
+    """
+    Coverage is based on UNIQUE interview/source labels represented
+    in supporting quotes.
+
+    Multiple quotes from the same interviewee therefore count once.
+    """
+    if not isinstance(quotes, list):
+        return []
+
+    sources = []
+    seen = set()
+
+    for quote in quotes:
+        if not isinstance(quote, dict):
+            continue
+
+        source = get_value(quote, "source", default="")
+
+        if not isinstance(source, str):
+            continue
+
+        source = source.strip()
+
+        if not source:
+            continue
+
+        normalized_source = source.lower()
+
+        if normalized_source not in seen:
+            seen.add(normalized_source)
+            sources.append(source)
+
+    return sources
+
+
+def get_roles_for_sources(analysis, sources, fallback_roles=None):
+    """
+    Try to derive roles from evidence_base using the quote source labels.
+
+    If the model's source labels do not exactly match evidence_base labels,
+    fall back to the roles returned inside coverage.
+
+    Roles are always deduplicated before display.
+    """
+    evidence_base = get_value(analysis, "evidence_base", default={})
+    participants = get_value(evidence_base, "participants", default=[])
+
+    source_lookup = {
+        source.strip().lower()
+        for source in sources
+        if isinstance(source, str) and source.strip()
+    }
+
+    matched_roles = []
+
+    if isinstance(participants, list):
+        for participant in participants:
+            if not isinstance(participant, dict):
+                continue
+
+            source_label = get_value(
+                participant,
+                "source_label",
+                default=""
+            )
+
+            role = get_value(
+                participant,
+                "role",
+                default=""
+            )
+
+            if (
+                isinstance(source_label, str)
+                and source_label.strip().lower() in source_lookup
+                and isinstance(role, str)
+                and role.strip()
+            ):
+                matched_roles.append(role.strip())
+
+    matched_roles = deduplicate_strings(matched_roles)
+
+    if matched_roles:
+        return matched_roles
+
+    return deduplicate_strings(fallback_roles or [])
+
+
+def calculate_coverage(item, analysis):
+    """
+    Calculate coverage deterministically from UNIQUE supporting quote sources.
+
+    The model still chooses which quotes support the finding.
+    Python handles the counting and arithmetic.
+
+    This prevents errors such as:
+    - 3 quotes from 2 interviewees being displayed as 3/10
+    - duplicate role labels
+    - incorrect percentages
+    """
+    model_coverage = get_value(item, "coverage", default={})
+
+    if not isinstance(model_coverage, dict):
+        model_coverage = {}
+
+    supporting_quotes = get_value(
+        item,
+        "supporting_quotes",
+        "supportingQuotes",
+        default=[]
+    )
+
+    unique_sources = get_unique_quote_sources(supporting_quotes)
+    count = len(unique_sources)
+
+    model_total = model_coverage.get("total", "N/A")
+    total = get_total_participants(
+        analysis,
+        fallback=model_total
+    )
+
+    if isinstance(total, str) and total.isdigit():
+        total = int(total)
+
+    if isinstance(total, (int, float)) and total > 0:
+        percentage = round((count / total) * 100)
+    else:
+        percentage = "N/A"
+
+    roles = get_roles_for_sources(
+        analysis,
+        unique_sources,
+        fallback_roles=model_coverage.get("roles", [])
+    )
+
+    return {
+        "count": count,
+        "total": total,
+        "percentage": percentage,
+        "roles": roles,
+        "sources": unique_sources,
+    }
+
+
 def normalize_coverage(coverage):
+    """
+    Kept as a compatibility helper for older output formats.
+    New Pattern results should use calculate_coverage().
+    """
     if isinstance(coverage, dict):
         return {
             "count": coverage.get("count", "N/A"),
             "total": coverage.get("total", "N/A"),
             "percentage": coverage.get("percentage", "N/A"),
-            "roles": coverage.get("roles", []),
+            "roles": deduplicate_strings(coverage.get("roles", [])),
+            "sources": deduplicate_strings(coverage.get("sources", [])),
         }
 
     if isinstance(coverage, str):
@@ -132,19 +331,23 @@ def normalize_coverage(coverage):
             count = count_match.group(1)
             total = count_match.group(2)
 
-        percentage_match = re.search(r"$begin:math:text$\(\\d\+\)\%$end:math:text$", coverage)
+        percentage_match = re.search(r"(\d+)%", coverage)
         if percentage_match:
             percentage = percentage_match.group(1)
 
         roles_match = re.search(r"Roles:\s*(.*)", coverage)
         if roles_match:
-            roles = [role.strip() for role in roles_match.group(1).split(",")]
+            roles = [
+                role.strip()
+                for role in roles_match.group(1).split(",")
+            ]
 
         return {
             "count": count,
             "total": total,
             "percentage": percentage,
-            "roles": roles,
+            "roles": deduplicate_strings(roles),
+            "sources": [],
         }
 
     return {
@@ -152,6 +355,7 @@ def normalize_coverage(coverage):
         "total": "N/A",
         "percentage": "N/A",
         "roles": [],
+        "sources": [],
     }
 
 
@@ -170,14 +374,36 @@ def render_quotes(quotes):
 
 
 def render_critical_insights(analysis):
-    critical_insights = get_section(analysis, "critical_insights", "Critical Insights")
+    critical_insights = get_section(
+        analysis,
+        "critical_insights",
+        "Critical Insights"
+    )
 
     for insight in critical_insights:
         rank = get_value(insight, "rank", default="")
-        title = get_value(insight, "title", default="Untitled insight")
-        evidence_strength = get_value(insight, "evidence_strength", "evidenceStrength", default="N/A")
-        strategic_importance = get_value(insight, "strategic_importance", "strategicImportance", default="N/A")
-        coverage = normalize_coverage(get_value(insight, "coverage", default={}))
+        title = get_value(
+            insight,
+            "title",
+            default="Untitled insight"
+        )
+        evidence_strength = get_value(
+            insight,
+            "evidence_strength",
+            "evidenceStrength",
+            default="N/A"
+        )
+        strategic_importance = get_value(
+            insight,
+            "strategic_importance",
+            "strategicImportance",
+            default="N/A"
+        )
+
+        coverage = calculate_coverage(
+            insight,
+            analysis
+        )
 
         roles = ", ".join(coverage["roles"])
 
@@ -207,22 +433,61 @@ def render_critical_insights(analysis):
 
             with st.expander("Show details"):
                 st.markdown("**Why it matters**")
-                st.write(get_value(insight, "why_it_matters", "whyItMatters", default=""))
+                st.write(
+                    get_value(
+                        insight,
+                        "why_it_matters",
+                        "whyItMatters",
+                        default=""
+                    )
+                )
 
                 st.markdown("**Supporting quotes**")
-                render_quotes(get_value(insight, "supporting_quotes", "supportingQuotes", default=[]))
+                render_quotes(
+                    get_value(
+                        insight,
+                        "supporting_quotes",
+                        "supportingQuotes",
+                        default=[]
+                    )
+                )
 
                 st.markdown("**Recommended next step**")
-                st.write(get_value(insight, "recommended_next_step", "recommendedNextStep", default=""))
+                st.write(
+                    get_value(
+                        insight,
+                        "recommended_next_step",
+                        "recommendedNextStep",
+                        default=""
+                    )
+                )
 
 
 def render_strategic_risks(analysis):
-    strategic_risks = get_section(analysis, "strategic_risks", "Strategic Risks")
+    strategic_risks = get_section(
+        analysis,
+        "strategic_risks",
+        "Strategic Risks"
+    )
 
     for risk in strategic_risks:
-        title = get_value(risk, "title", default="Untitled risk")
-        evidence_strength = get_value(risk, "evidence_strength", "evidenceStrength", default="N/A")
-        coverage = normalize_coverage(get_value(risk, "coverage", default={}))
+        title = get_value(
+            risk,
+            "title",
+            default="Untitled risk"
+        )
+        evidence_strength = get_value(
+            risk,
+            "evidence_strength",
+            "evidenceStrength",
+            default="N/A"
+        )
+
+        coverage = calculate_coverage(
+            risk,
+            analysis
+        )
+
         roles = ", ".join(coverage["roles"])
 
         with st.container(border=True):
@@ -248,13 +513,34 @@ def render_strategic_risks(analysis):
 
             with st.expander("Show details"):
                 st.markdown("**Potential impact**")
-                st.write(get_value(risk, "potential_impact", "potentialImpact", default=""))
+                st.write(
+                    get_value(
+                        risk,
+                        "potential_impact",
+                        "potentialImpact",
+                        default=""
+                    )
+                )
 
                 st.markdown("**Supporting quotes**")
-                render_quotes(get_value(risk, "supporting_quotes", "supportingQuotes", default=[]))
+                render_quotes(
+                    get_value(
+                        risk,
+                        "supporting_quotes",
+                        "supportingQuotes",
+                        default=[]
+                    )
+                )
 
                 st.markdown("**Recommended mitigation**")
-                st.write(get_value(risk, "recommended_mitigation", "recommendedMitigation", default=""))
+                st.write(
+                    get_value(
+                        risk,
+                        "recommended_mitigation",
+                        "recommendedMitigation",
+                        default=""
+                    )
+                )
 
 
 def render_contradictions(analysis):
@@ -265,7 +551,11 @@ def render_contradictions(analysis):
     )
 
     for contradiction in contradictions:
-        title = get_value(contradiction, "title", default="Untitled contradiction")
+        title = get_value(
+            contradiction,
+            "title",
+            default="Untitled contradiction"
+        )
 
         with st.container(border=True):
             st.markdown(
@@ -275,37 +565,123 @@ def render_contradictions(analysis):
 
             with st.expander("Show details"):
                 st.markdown("**Why it matters**")
-                st.write(get_value(contradiction, "why_it_matters", "whyItMatters", default=""))
+                st.write(
+                    get_value(
+                        contradiction,
+                        "why_it_matters",
+                        "whyItMatters",
+                        default=""
+                    )
+                )
 
-                side_a = get_value(contradiction, "side_a", "sideA", default=None)
-                side_b = get_value(contradiction, "side_b", "sideB", default=None)
+                side_a = get_value(
+                    contradiction,
+                    "side_a",
+                    "sideA",
+                    default=None
+                )
+                side_b = get_value(
+                    contradiction,
+                    "side_b",
+                    "sideB",
+                    default=None
+                )
 
                 if side_a or side_b:
                     st.markdown("**Side A**")
-                    st.caption(", ".join(get_value(side_a, "roles", default=[])))
-                    render_quotes(get_value(side_a, "quotes", default=[]))
+
+                    if isinstance(side_a, dict):
+                        side_a_roles = deduplicate_strings(
+                            get_value(
+                                side_a,
+                                "roles",
+                                default=[]
+                            )
+                        )
+                        st.caption(", ".join(side_a_roles))
+                        render_quotes(
+                            get_value(
+                                side_a,
+                                "quotes",
+                                default=[]
+                            )
+                        )
 
                     st.markdown("**Side B**")
-                    st.caption(", ".join(get_value(side_b, "roles", default=[])))
-                    render_quotes(get_value(side_b, "quotes", default=[]))
+
+                    if isinstance(side_b, dict):
+                        side_b_roles = deduplicate_strings(
+                            get_value(
+                                side_b,
+                                "roles",
+                                default=[]
+                            )
+                        )
+                        st.caption(", ".join(side_b_roles))
+                        render_quotes(
+                            get_value(
+                                side_b,
+                                "quotes",
+                                default=[]
+                            )
+                        )
+
                 else:
                     st.markdown("**Supporting quotes**")
-                    render_quotes(get_value(contradiction, "supporting_quotes", "supportingQuotes", default=[]))
+                    render_quotes(
+                        get_value(
+                            contradiction,
+                            "supporting_quotes",
+                            "supportingQuotes",
+                            default=[]
+                        )
+                    )
 
                 st.markdown("**What should be validated**")
-                st.write(get_value(contradiction, "what_should_be_validated", "whatShouldBeValidated", default=""))
+                st.write(
+                    get_value(
+                        contradiction,
+                        "what_should_be_validated",
+                        "whatShouldBeValidated",
+                        default=""
+                    )
+                )
 
                 st.markdown("**Potential product implication**")
-                st.write(get_value(contradiction, "potential_product_implication", "potentialProductImplication", default=""))
+                st.write(
+                    get_value(
+                        contradiction,
+                        "potential_product_implication",
+                        "potentialProductImplication",
+                        default=""
+                    )
+                )
 
 
 def render_weak_signals(analysis):
-    weak_signals = get_section(analysis, "weak_signals", "Weak Signals / Emerging Patterns")
+    weak_signals = get_section(
+        analysis,
+        "weak_signals",
+        "Weak Signals / Emerging Patterns"
+    )
 
     for signal in weak_signals:
-        title = get_value(signal, "title", default="Untitled signal")
-        confidence = get_value(signal, "confidence", default="N/A")
-        coverage = normalize_coverage(get_value(signal, "coverage", default={}))
+        title = get_value(
+            signal,
+            "title",
+            default="Untitled signal"
+        )
+        confidence = get_value(
+            signal,
+            "confidence",
+            default="N/A"
+        )
+
+        coverage = calculate_coverage(
+            signal,
+            analysis
+        )
+
         roles = ", ".join(coverage["roles"])
 
         with st.container(border=True):
@@ -331,21 +707,55 @@ def render_weak_signals(analysis):
 
             with st.expander("Show details"):
                 st.markdown("**Why it may matter**")
-                st.write(get_value(signal, "why_it_may_matter", "whyItMayMatterStrategically", default=""))
+                st.write(
+                    get_value(
+                        signal,
+                        "why_it_may_matter",
+                        "whyItMayMatterStrategically",
+                        default=""
+                    )
+                )
 
                 st.markdown("**Supporting quotes**")
-                render_quotes(get_value(signal, "supporting_quotes", "supportingQuotes", default=[]))
+                render_quotes(
+                    get_value(
+                        signal,
+                        "supporting_quotes",
+                        "supportingQuotes",
+                        default=[]
+                    )
+                )
 
                 st.markdown("**Why this might be overlooked**")
-                st.write(get_value(signal, "why_this_might_be_overlooked", "whyThisMightBeOverlooked", default=""))
+                st.write(
+                    get_value(
+                        signal,
+                        "why_this_might_be_overlooked",
+                        "whyThisMightBeOverlooked",
+                        default=""
+                    )
+                )
 
 
 def render_assumptions(analysis):
-    assumptions = get_section(analysis, "assumptions_to_validate", "Assumptions Requiring Validation")
+    assumptions = get_section(
+        analysis,
+        "assumptions_to_validate",
+        "Assumptions Requiring Validation"
+    )
 
     for assumption in assumptions:
-        title = get_value(assumption, "title", default="Untitled assumption")
-        risk_level = get_value(assumption, "risk_level", "riskLevel", default="N/A")
+        title = get_value(
+            assumption,
+            "title",
+            default="Untitled assumption"
+        )
+        risk_level = get_value(
+            assumption,
+            "risk_level",
+            "riskLevel",
+            default="N/A"
+        )
 
         with st.container(border=True):
             st.markdown(
@@ -364,13 +774,34 @@ def render_assumptions(analysis):
 
             with st.expander("Show details"):
                 st.markdown("**Why it may be dangerous**")
-                st.write(get_value(assumption, "why_it_may_be_dangerous", "whyItMayBeDangerous", default=""))
+                st.write(
+                    get_value(
+                        assumption,
+                        "why_it_may_be_dangerous",
+                        "whyItMayBeDangerous",
+                        default=""
+                    )
+                )
 
                 st.markdown("**Supporting quotes**")
-                render_quotes(get_value(assumption, "supporting_quotes", "supportingQuotes", default=[]))
+                render_quotes(
+                    get_value(
+                        assumption,
+                        "supporting_quotes",
+                        "supportingQuotes",
+                        default=[]
+                    )
+                )
 
                 st.markdown("**Suggested validation activity**")
-                st.write(get_value(assumption, "suggested_validation_activity", "suggestedValidationActivity", default=""))
+                st.write(
+                    get_value(
+                        assumption,
+                        "suggested_validation_activity",
+                        "suggestedValidationActivity",
+                        default=""
+                    )
+                )
 
 
 with st.sidebar:
@@ -420,11 +851,11 @@ with st.sidebar:
 
     st.markdown(
         """
-<div class="score-row"><strong>5/5</strong> = repeated and strongly supported</div>
-<div class="score-row"><strong>4/5</strong> = strong evidence</div>
-<div class="score-row"><strong>3/5</strong> = multiple mentions</div>
-<div class="score-row"><strong>2/5</strong> = limited evidence</div>
-<div class="score-row"><strong>1/5</strong> = weak evidence</div>
+<div class="score-row"><strong>5/5</strong> = unusually strong, highly consistent evidence</div>
+<div class="score-row"><strong>4/5</strong> = strong, consistent evidence from 3+ participants</div>
+<div class="score-row"><strong>3/5</strong> = clear evidence from 2+ participants</div>
+<div class="score-row"><strong>2/5</strong> = strong evidence from one, or limited evidence from two</div>
+<div class="score-row"><strong>1/5</strong> = limited evidence from one participant</div>
 """,
         unsafe_allow_html=True
     )
@@ -467,7 +898,10 @@ if st.button("Analyze research"):
     else:
         with st.spinner("Analyzing research..."):
 
-            with open("prompts/extraction_prompt_v2_json.md", "r") as file:
+            with open(
+                "prompts/research_synthesis_prompt_v6.md",
+                "r"
+            ) as file:
                 extraction_prompt = file.read()
 
             prompt = f"""
@@ -478,12 +912,15 @@ Research notes:
 """
 
             response = client.chat.completions.create(
-                model="gpt-4.1-mini",
+                model="gpt-5.6-luna",
                 response_format={"type": "json_object"},
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are an expert product research synthesis assistant. Return only valid JSON."
+                        "content": (
+                            "You are an expert research insights synthesis "
+                            "assistant. Return only valid JSON."
+                        )
                     },
                     {
                         "role": "user",
@@ -495,7 +932,9 @@ Research notes:
             result = response.choices[0].message.content
 
             try:
-                analysis = json.loads(clean_json_response(result))
+                analysis = json.loads(
+                    clean_json_response(result)
+                )
 
                 st.subheader("Research Analysis")
 
@@ -525,6 +964,8 @@ Research notes:
                     render_assumptions(analysis)
 
             except json.JSONDecodeError:
-                st.error("The model returned output that could not be parsed as JSON.")
+                st.error(
+                    "The model returned output that could not be parsed as JSON."
+                )
                 st.markdown("### Raw model output")
                 st.code(result)
