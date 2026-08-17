@@ -22,7 +22,7 @@ That led to the main principle behind Pattern:
 
 **No quote, no insight.**
 
-Every finding has to be supported by evidence from the research.
+Evidence-based findings have to be traceable to the research. Assumptions are kept separate and explicitly framed as things that still need validation.
 
 ## What makes Pattern different
 
@@ -68,9 +68,7 @@ I designed the product concept, synthesis framework, prompting logic, scoring ap
 
 ## Sample data
 
-A sample interview dataset is included in:
-
-`sample_data/interview_notes_sample.md`
+Two sample interview datasets are included in `sample_data/` for testing.
 
 ## Current status
 
@@ -84,12 +82,12 @@ Pattern turns raw research into evidence-backed findings with traceable supporti
 
 ### Critical insights
 
-![Pattern critical insight example](screenshots/critical-insight.png)
+![Pattern critical insight example](Screenshots/critical-insight.png)
 
 ### Strategic risks
 
-![Pattern strategic risk example](screenshots/strategic-risk.png)
+![Pattern strategic risk example](Screenshots/strategic-risk.png)
 
 ### Assumptions to validate
 
-![Pattern assumption validation example](screenshots/assumption-validation.png)
+![Pattern assumption validation example](Screenshots/assumption-validation.png)
