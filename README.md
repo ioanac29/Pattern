@@ -77,3 +77,19 @@ A sample interview dataset is included in:
 Pattern is an experimental prototype, not an autonomous decision-maker.
 
 I see its role as supporting human synthesis: challenging conclusions, surfacing evidence that may have been overlooked, preserving contradictions, and helping teams decide what deserves another look.
+
+## Example output
+
+Pattern turns raw research into evidence-backed findings with traceable supporting quotes, coverage, and recommended next steps.
+
+### Critical insights
+
+![Pattern critical insight example](screenshots/critical-insight.png)
+
+### Strategic risks
+
+![Pattern strategic risk example](screenshots/strategic-risk.png)
+
+### Assumptions to validate
+
+![Pattern assumption validation example](screenshots/assumption-validation.png)
